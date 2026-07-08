@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""step2cadquery orchestrator: STEP file -> brief -> build.
+
+For one local .step file:
+  1. render_step.py    - measure bbox/volume + render 6 labeled view PNGs
+  2. gen_brief_step.py - one vision session writes design_readme.md + brief.md
+                         (faithful reconstruction, no creative candidates)
+  3. gen_model.py      - a headless session builds the brief as a parametric
+                         CadQuery project via the cadcode skill
+
+Input:  path/to/part.step
+Output: out/<slug>/ - main.py, params.py, spec.md, <slug>.step, <slug>.stl
+
+Every invocation is a redo - each stage wipes its own stale outputs.
+Stdlib-only; the dependency-bearing stages run under `uv run`.
+
+Usage:
+    python3 pipeline.py <file.step>
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+UV = ["uv", "run", "--python", "3.12"]
+
+
+def run_stage(label: str, cmd: list[str]) -> tuple[int, str]:
+    """Run a stage streaming its output; return (exit_code, stdout)."""
+    print(f"\n=== {label} ===\n$ {' '.join(cmd)}", flush=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, cwd=str(HERE))
+    lines = []
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        lines.append(line)
+    proc.wait()
+    return proc.returncode, "".join(lines)
+
+
+def last_json_line(output: str) -> dict:
+    for line in reversed(output.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    raise RuntimeError("stage printed no JSON result line")
+
+
+def is_quota_error(result: dict) -> bool:
+    """Claude usage-window exhaustion -> temp failure (exit 75): retry later."""
+    if result.get("limit_hit"):
+        return True
+    text = (result.get("error") or "") + " " + " ".join(result.get("verify", {}).get("problems") or [])
+    return bool(re.search(r"usage limit|session limit|rate.?limit|quota|overloaded|529|too many requests", text, re.I))
+
+
+def llm_stage(label: str, script: str, slug: str) -> tuple[bool, dict]:
+    rc, out = run_stage(label, UV + ["--with", "claude-agent-sdk", "python3",
+                                     str(HERE / script), slug])
+    result = last_json_line(out)
+    failed = rc != 0 or not (result["status"] == "done" and result.get("verify", {}).get("ok"))
+    return failed, result
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("step_file", help="path to a .step/.stp file")
+    args = ap.parse_args()
+
+    step_path = Path(args.step_file).resolve()
+    if not step_path.is_file():
+        print(f"no such file: {step_path}")
+        return 1
+
+    # 1) render + measure
+    rc, out = run_stage("RENDER + MEASURE", UV + [
+        "--with", "cadquery", "--with", "trimesh", "--with", "matplotlib",
+        "python3", str(HERE / "render_step.py"), str(step_path)])
+    if rc != 0:
+        print(f"\n render stage failed (exit {rc})")
+        return 1
+    render = last_json_line(out)
+    slug = render["slug"]
+    print(f"\nrendered: {slug} bbox={render['bbox_mm']} solids={render['num_solids']}")
+
+    # 2) faithful-reconstruction brief (vision over the renders)
+    brief_failed, brief = llm_stage("BRIEF (faithful reconstruction)", "gen_brief_step.py", slug)
+    if brief_failed:
+        print(f"\n brief stage failed: status={brief['status']} problems={brief.get('verify', {}).get('problems')}")
+        return 75 if is_quota_error(brief) else 1
+    print(f"\n brief ready ({brief['minutes']}min)")
+
+    # 3) build (gen_model.py verifies + prunes on success)
+    gen_failed, gen = llm_stage("BUILD (cadcode skill)", "gen_model.py", slug)
+    if gen_failed:
+        print(f"\n build failed: status={gen['status']} problems={gen.get('verify', {}).get('problems')}")
+        return 75 if is_quota_error(gen) else 1
+    print(f"\n DONE: {gen['out_dir']}  (turns={gen['turns']}, {gen['minutes']}min, "
+          f"volume={gen['verify'].get('volume_mm3')})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
