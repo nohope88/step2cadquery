@@ -29,17 +29,17 @@ python3 pipeline.py examples/3DBenchyStepFile.step
 # → out/3dbenchystepfile/{main.py, params.py, spec.md, *.step, *.stl}
 ```
 
-Every invocation is a full redo for that file. Exit codes: `0` success,
-`1` hard failure, `75` quota/rate-limited (retry later).
-
-Run stages individually (slug = lowercased filename stem):
+## Tests
 
 ```bash
-uv run --python 3.12 --with cadquery --with trimesh --with matplotlib \
-    python3 render_step.py <file.step>
-uv run --python 3.12 --with claude-agent-sdk python3 gen_brief_step.py <slug>
-uv run --python 3.12 --with claude-agent-sdk python3 gen_model.py <slug>
+uv run --python 3.12 --with pytest --with pytest-cov python3 -m pytest tests/ \
+    --cov=pipeline --cov=render_step --cov=gen_brief_step --cov=gen_model \
+    --cov-report=term-missing --cov-fail-under=100
 ```
+
+Runs offline in <1 s — the Claude Agent SDK and CadQuery are stubbed
+(`tests/sdk_stub.py`, fake `cadquery` module), so no auth or heavy deps needed.
+Coverage is 100% on all four modules.
 
 ## Requirements
 
