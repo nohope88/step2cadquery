@@ -101,6 +101,24 @@ def main() -> int:
         return 75 if is_quota_error(gen) else 1
     print(f"\n DONE: {gen['out_dir']}  (turns={gen['turns']}, {gen['minutes']}min, "
           f"volume={gen['verify'].get('volume_mm3')})")
+
+    # 4) fidelity report vs the source (informational — never fails the run)
+    stls = sorted(Path(gen["out_dir"]).glob("*.stl"))
+    if stls:
+        rc, out = run_stage("EVALUATE (fidelity vs source)", UV + [
+            "--with", "cadquery", "--with", "trimesh", "--with", "scipy",
+            "python3", str(HERE / "evaluate.py"), str(step_path), str(stls[0])])
+        if rc == 0:
+            fidelity = last_json_line(out)
+            fid_path = HERE / "text" / slug / "fidelity.json"
+            fid_path.parent.mkdir(parents=True, exist_ok=True)
+            fid_path.write_text(json.dumps(fidelity), encoding="utf-8")
+            print(f"\n fidelity: score={fidelity['score']} chamfer={fidelity['chamfer_mm']}mm "
+                  f"volume_err={fidelity['volume_err_pct']}%")
+        else:
+            print("\n evaluate failed (non-fatal)")
+    else:
+        print("\n no .stl found to evaluate (non-fatal)")
     return 0
 
 

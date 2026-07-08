@@ -49,6 +49,12 @@ GROUND TRUTH — measured from the STEP geometry itself (renders carry no scale
 reference, so never second-guess these numbers from the images):
 {measurements}
 
+VOLUME SANITY CHECK — compare volume_mm3 against the solid envelope
+(bbox x·y·z). A much smaller volume means the object is hollow, shelled or
+openwork: infer wall thicknesses and cavity depths so a build following your
+brief lands within ~15% of the measured volume, and state those numbers in
+the brief.
+
 INPUT — Read every PNG in `{text_dir}/showcase_images/`. Filenames carry the
 view angle (iso, front, back, left, right, top). Study all six before writing.
 
@@ -75,9 +81,11 @@ WRITE exactly two files:
      on a 200x200 mm FDM bed
    - `## Build notes` — CadQuery construction plan: primitives, booleans,
      lofts/revolves, build order. Where the shape is organic or sculpted,
-     specify an explicit parametric approximation (lofted section profiles,
-     arcs, revolves) with concrete section positions and sizes in mm — the
-     builder cannot sculpt freeform surfaces.
+     specify an explicit parametric approximation with concrete section
+     positions and sizes in mm — the builder cannot sculpt freeform
+     surfaces. Use AT LEAST 8 loft stations for organic hulls/bodies and
+     smooth spline/arc section profiles (not straight polylines) so the
+     lofted surface reads smooth, not faceted.
 
 FAITHFULNESS RULE: someone comparing the rebuilt model to these renders must
 recognize the SAME object at the SAME size. Simplify only where parametric

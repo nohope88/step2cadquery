@@ -82,6 +82,10 @@ after the readme and BUILD EXACTLY THAT design:
   dimension you need is missing from the brief.
 - spec.md's H1 title must be the brief's title, and its one-paragraph
   description should match the brief's concept.
+- While visually reviewing, Read the reference photos in the source
+  showcase_images/ folder next to your own renders and iterate until
+  silhouette, proportions and hollow regions visibly match; give curved
+  surfaces enough loft/spline resolution that they don't look faceted.
 - Printability and the skill's non-negotiables still beat the brief on any
   conflict — deviate minimally and note it in a code comment."""
 
@@ -183,6 +187,8 @@ def verify(slug: str) -> dict:
                 is_solid = (meta.get("validation") or {}).get("is_solid")
             if is_solid is False:
                 problems.append("is_solid=false")
+            elif is_solid is None:
+                problems.append("is_solid not recorded in sidecar")
             blocking = [
                 w for w in _collect_warnings(meta)
                 if w.get("kind") in BLOCKING_WARNINGS or w.get("severity") == "warning"

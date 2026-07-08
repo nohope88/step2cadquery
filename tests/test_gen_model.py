@@ -113,6 +113,12 @@ def test_verify_not_solid(dirs):
     assert "is_solid=false" in gen_model.verify("s")["problems"]
 
 
+def test_verify_missing_is_solid(dirs):
+    out = make_good_project(gen_model.OUT_DIR / "s", sidecar=False)
+    (out / "part.step.json").write_text(json.dumps({"volume_mm3": 1.0, "warnings": []}))
+    assert "is_solid not recorded in sidecar" in gen_model.verify("s")["problems"]
+
+
 def test_verify_nested_is_solid_false(dirs):
     out = make_good_project(gen_model.OUT_DIR / "s", sidecar=False)
     (out / "part.step.json").write_text(json.dumps(

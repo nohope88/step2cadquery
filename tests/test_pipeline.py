@@ -95,21 +95,58 @@ def test_main_render_failure(tmp_path, monkeypatch):
     assert pipeline.main() == 1
 
 
-def make_stage_mocks(monkeypatch, brief=(False, BRIEF_OK), gen=(False, GEN_OK)):
-    monkeypatch.setattr(pipeline, "run_stage", lambda label, cmd: (0, RENDER_JSON + "\n"))
+EVAL_JSON = json.dumps({"score": 90.0, "chamfer_mm": 1.0, "chamfer_pct": 1.2,
+                        "volume_err_pct": 5.0, "flipped_180": False})
+
+
+def make_stage_mocks(monkeypatch, brief=(False, BRIEF_OK), gen=(False, GEN_OK), eval_rc=0):
+    def fake_run_stage(label, cmd):
+        if label.startswith("EVALUATE"):
+            return eval_rc, EVAL_JSON + "\n"
+        return 0, RENDER_JSON + "\n"
+
+    monkeypatch.setattr(pipeline, "run_stage", fake_run_stage)
     results = {"gen_brief_step.py": brief, "gen_model.py": gen}
     monkeypatch.setattr(pipeline, "llm_stage",
                         lambda label, script, slug: results[script])
 
 
-def test_main_success(tmp_path, monkeypatch, capsys):
+def test_main_success_without_stl_skips_eval(tmp_path, monkeypatch, capsys):
     step = tmp_path / "p.step"
     step.write_text("x")
     set_argv(monkeypatch, step)
-    make_stage_mocks(monkeypatch)
+    make_stage_mocks(monkeypatch)  # GEN_OK's out_dir has no .stl on disk
     assert pipeline.main() == 0
     out = capsys.readouterr().out
     assert "DONE: /out/s" in out and "turns=42" in out
+    assert "no .stl found to evaluate" in out
+
+
+def test_main_success_with_fidelity_report(tmp_path, monkeypatch, capsys):
+    step = tmp_path / "p.step"
+    step.write_text("x")
+    out_dir = tmp_path / "out" / "s"
+    out_dir.mkdir(parents=True)
+    (out_dir / "s.stl").write_text("solid")
+    set_argv(monkeypatch, step)
+    make_stage_mocks(monkeypatch, gen=(False, dict(GEN_OK, out_dir=str(out_dir))))
+    monkeypatch.setattr(pipeline, "HERE", tmp_path)
+    assert pipeline.main() == 0
+    assert "fidelity: score=90.0" in capsys.readouterr().out
+    saved = json.loads((tmp_path / "text" / "s" / "fidelity.json").read_text())
+    assert saved["score"] == 90.0
+
+
+def test_main_evaluate_failure_is_non_fatal(tmp_path, monkeypatch, capsys):
+    step = tmp_path / "p.step"
+    step.write_text("x")
+    out_dir = tmp_path / "out" / "s"
+    out_dir.mkdir(parents=True)
+    (out_dir / "s.stl").write_text("solid")
+    set_argv(monkeypatch, step)
+    make_stage_mocks(monkeypatch, gen=(False, dict(GEN_OK, out_dir=str(out_dir))), eval_rc=1)
+    assert pipeline.main() == 0
+    assert "evaluate failed (non-fatal)" in capsys.readouterr().out
 
 
 def test_main_brief_quota_failure_exits_75(tmp_path, monkeypatch):
