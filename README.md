@@ -46,9 +46,11 @@ Coverage is 100% on all four modules.
 - `uv` (stages pull `cadquery` / `trimesh` / `matplotlib` / `claude-agent-sdk`
   on demand)
 - authenticated `claude` CLI (subscription OAuth token works headless)
-- the **cadcode skill** installed at `~/.claude/skills/cadcode` — provides the
-  headless renderer used by stage 1 and the build loop / helpers used by
-  stage 3
+
+The **cadcode skill** (headless renderer for stage 1, build loop + helpers for
+stage 3) is bundled at `skills/cadcode/` (MIT) — nothing to install. Set the
+`CADCODE_SKILL` env var to use a shared install instead (e.g.
+`~/.claude/skills/cadcode`).
 
 ## Models
 

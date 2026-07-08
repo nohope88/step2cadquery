@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 import tempfile
@@ -25,7 +26,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TEXT_DIR = HERE / "text"
-CADPY_PACKAGES = Path.home() / ".claude" / "skills" / "cadcode" / "scripts" / "packages"
+# The cadcode skill is bundled with this repo; CADCODE_SKILL env overrides.
+CADCODE_SKILL = Path(os.environ.get("CADCODE_SKILL", str(HERE / "skills" / "cadcode")))
+CADPY_PACKAGES = CADCODE_SKILL / "scripts" / "packages"
 
 # (label, elev, azim) for mplot3d view_init — iso/top match the skill's
 # DEFAULT_VIEWS; the four elevation-0 views walk around the object.

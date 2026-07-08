@@ -34,7 +34,9 @@ MODEL = os.environ.get("GEN_MODEL", "claude-sonnet-5")
 MAX_TURNS = int(os.environ.get("GEN_MAX_TURNS", "250"))
 PERMISSION_MODE = "bypassPermissions"  # unattended headless run
 
-CADCODE_SKILL = Path.home() / ".claude" / "skills" / "cadcode"
+# The cadcode skill is bundled with this repo; CADCODE_SKILL env overrides
+# (e.g. to a shared install at ~/.claude/skills/cadcode).
+CADCODE_SKILL = Path(os.environ.get("CADCODE_SKILL", str(HERE / "skills" / "cadcode")))
 CAD_CMD = f"uv run --python 3.12 --with cadquery python3 {CADCODE_SKILL}/scripts/cad"
 REVIEW_CMD = f"uv run --python 3.12 --with cadquery python3 {CADCODE_SKILL}/scripts/review"
 
