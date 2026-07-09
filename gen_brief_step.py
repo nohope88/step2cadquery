@@ -37,6 +37,27 @@ BRIEF_MODEL = os.environ.get("BRIEF_MODEL", "claude-opus-4-8")
 def build_brief_prompt(slug: str) -> str:
     text_dir = gen_model.TEXT_DIR / slug
     measurements = (text_dir / "measurements.json").read_text(encoding="utf-8").strip()
+    cross_sections_path = text_dir / "cross_sections.json"
+    cross_sections_section = ""
+    if cross_sections_path.is_file():
+        cross_sections_section = f"""
+
+MEASURED CROSS-SECTIONS (exact, not estimated) — `{cross_sections_path}`:
+{cross_sections_path.read_text(encoding="utf-8").strip()}
+
+Each entry under `solids` is one actual solid in the STEP file: its bounding
+box, volume, and a table of `stations` sliced along the part's longest axis
+— scoped to THAT solid alone, so e.g. a cabin sitting on a hull never leaks
+into the hull's own station numbers, and vice versa. This is ground truth:
+- `solids[].bbox_mm` / `volume_mm3` tell you which features are actually
+  unioned into one body vs kept separate — partition your CadQuery solids to
+  match this, not a guess from the renders.
+- `solids[].stations` are that body's real profile — copy these axis
+  positions and extents directly into the brief's station table instead of
+  estimating proportions from the photos. Use the renders only for what the
+  numbers can't show: feature shapes (arches, windows, fillets), symmetry,
+  and what the object is."""
+
     return f"""{HEADLESS_SESSION_WARNING}
 
 You are a CAD reverse-engineering analyst. A STEP file was rendered to images
@@ -48,6 +69,7 @@ reinterpretation: describe and specify the object exactly as it is.
 GROUND TRUTH — measured from the STEP geometry itself (renders carry no scale
 reference, so never second-guess these numbers from the images):
 {measurements}
+{cross_sections_section}
 
 VOLUME SANITY CHECK — compare volume_mm3 against the solid envelope
 (bbox x·y·z). A much smaller volume means the object is hollow, shelled or
@@ -85,7 +107,11 @@ WRITE exactly two files:
      positions and sizes in mm — the builder cannot sculpt freeform
      surfaces. Use AT LEAST 8 loft stations for organic hulls/bodies and
      smooth spline/arc section profiles (not straight polylines) so the
-     lofted surface reads smooth, not faceted.
+     lofted surface reads smooth, not faceted. If MEASURED CROSS-SECTIONS
+     were provided above, your station table IS that data (restate each
+     solid's measured stations verbatim, in mm) — do not thin it below what
+     was measured, and do not fall back to eyeballing the renders for
+     numbers the measurement already gives you exactly.
 
 FAITHFULNESS RULE: someone comparing the rebuilt model to these renders must
 recognize the SAME object at the SAME size. Simplify only where parametric

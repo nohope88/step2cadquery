@@ -39,6 +39,13 @@ PERMISSION_MODE = "bypassPermissions"  # unattended headless run
 CADCODE_SKILL = Path(os.environ.get("CADCODE_SKILL", str(HERE / "skills" / "cadcode")))
 CAD_CMD = f"uv run --python 3.12 --with cadquery python3 {CADCODE_SKILL}/scripts/cad"
 REVIEW_CMD = f"uv run --python 3.12 --with cadquery python3 {CADCODE_SKILL}/scripts/review"
+EVAL_CMD = f"uv run --python 3.12 --with cadquery --with trimesh --with scipy python3 {HERE}/evaluate.py"
+
+# In faithful-reconstruction mode the build agent may score itself against the
+# source with evaluate.py; stop refining once it clears this (a diminishing-
+# returns ceiling — chasing the last point burns turns on micro-geometry).
+FIDELITY_TARGET = float(os.environ.get("FIDELITY_TARGET", "95"))
+FIDELITY_MAX_CYCLES = int(os.environ.get("FIDELITY_MAX_CYCLES", "4"))
 
 BASE_EXTS = {".py", ".step", ".stp", ".stl"}
 KEEP_FILES = {"spec.md"}  # Panda importer reads its H1 as title, first paragraph as description
@@ -90,18 +97,71 @@ after the readme and BUILD EXACTLY THAT design:
   conflict — deviate minimally and note it in a code comment."""
 
 
-def build_prompt(slug: str) -> str:
+FIDELITY_SECTION = """FIDELITY LOOP — this is a FAITHFUL RECONSTRUCTION and the original source
+geometry is available at `{source_step}` for SCORING ONLY. The measured
+cross-section table in the brief already came from it. Once your model
+verifies as a clean solid, close a quantitative fidelity loop:
+
+  {eval_cmd} {source_step} {out_dir}/{slug}.step
+
+It prints one JSON line: `score` (0-100), `chamfer_mm` (mean surface distance),
+`bbox_err_pct` (per-axis size error), `volume_err_pct`, and `icp_rotation_deg`
+(how much alignment help it needed — a large value means your model's overall
+proportions/orientation are off, not just details). Read it and iterate the
+smallest responsible param change, re-`cad`, re-score:
+- high `chamfer_mm` / `icp_rotation_deg` → the lofted body's profile is off;
+  pull your loft stations closer to the brief's measured (x, y-range, z-range)
+  table and add loft resolution so curves aren't faceted.
+- `bbox_err_pct` on an axis → a dimension is wrong; fix that param.
+- `volume_err_pct` high → wrong hollowing: tune wall thickness / cavity depth
+  toward the brief's measured per-solid volumes.
+Push the score to >= {target} or until it stops improving, whichever comes
+first, but no more than {max_cycles} scoring cycles — then stop and hand off.
+
+HARD RULES for this loop: NEVER `importStep`, copy, trace, or re-export the
+source geometry — your `main.py` must build the shape parametrically from the
+brief's numbers. The source file is a measuring stick, not a part to load. Do
+not add it (or its path) to `main.py`, params.py, or any deliverable."""
+
+
+def build_prompt(slug: str, out_name: str | None = None) -> str:
     text_dir = TEXT_DIR / slug
-    out_dir = OUT_DIR / slug
+    out_dir = OUT_DIR / (out_name or slug)
     brief_path = text_dir / "brief.md"
     direction_section = (
         BRIEF_SECTION.format(brief_path=brief_path) if brief_path.is_file() else CREATIVITY_SECTION
     )
+
+    # Faithful-reconstruction mode: a brief AND the measured source STEP exist,
+    # so hand the builder a self-scoring fidelity loop. Absent either, keep the
+    # original "inspired by, no source geometry" framing.
+    source_step = None
+    meta_path = text_dir / "meta.json"
+    if brief_path.is_file() and meta_path.is_file():
+        try:
+            src = json.loads(meta_path.read_text(encoding="utf-8")).get("source_step")
+            if src and Path(src).is_file():
+                source_step = src
+        except (json.JSONDecodeError, OSError):
+            source_step = None
+
+    if source_step:
+        intro = """You are building a FAITHFUL, high-fidelity parametric CadQuery
+reconstruction of a real object from its measured brief and reference photos.
+The original geometry exists but is for SCORING ONLY (see FIDELITY LOOP) — you
+build the shape parametrically, you do not import or copy it."""
+        fidelity_section = "\n\n" + FIDELITY_SECTION.format(
+            source_step=source_step, eval_cmd=EVAL_CMD, out_dir=out_dir, slug=slug,
+            target=FIDELITY_TARGET, max_cycles=FIDELITY_MAX_CYCLES)
+    else:
+        intro = """You are designing an ORIGINAL parametric CadQuery model INSPIRED BY a real
+3D-printable product, working from its text description and reference photos
+only — you have NO source geometry files and must not download any."""
+        fidelity_section = ""
+
     return f"""{HEADLESS_SESSION_WARNING}
 
-You are designing an ORIGINAL parametric CadQuery model INSPIRED BY a real
-3D-printable product, working from its text description and reference photos
-only — you have NO source geometry files and must not download any.
+{intro}
 
 INPUT — read these first:
 - `{text_dir}/design_readme.md` — the product's title, summary, description,
@@ -139,7 +199,7 @@ and does. No other sections.
 
 Work only inside `{out_dir}` (plus reading `{text_dir}` and the skill). Do NOT
 write skill-feedback or pitfalls files. When the model verifies clean, reply
-with ONE short line: the project path and the final bbox + volume."""
+with ONE short line: the project path and the final bbox + volume.{fidelity_section}"""
 
 
 def _collect_warnings(meta: dict) -> list[dict]:
@@ -152,9 +212,9 @@ def _collect_warnings(meta: dict) -> list[dict]:
     return found
 
 
-def verify(slug: str) -> dict:
+def verify(slug: str, out_name: str | None = None) -> dict:
     """Check deliverables on disk — a session can end without finishing."""
-    out_dir = OUT_DIR / slug
+    out_dir = OUT_DIR / (out_name or slug)
     problems = []
     if not out_dir.is_dir():
         return {"ok": False, "problems": ["output dir missing"]}
@@ -181,10 +241,15 @@ def verify(slug: str) -> dict:
     else:
         try:
             meta = json.loads(sidecars[0].read_text(encoding="utf-8"))
-            meta_info = {"volume_mm3": meta.get("volume_mm3"), "bbox": meta.get("bbox")}
-            is_solid = meta.get("is_solid")
+            # cadpy's real sidecar nests these camelCase under "validation"
+            # (validation.isSolid / .volumeMm3 / .bbox) — the top-level
+            # snake_case fallbacks below are for older/alternate generators.
+            validation = meta.get("validation") or {}
+            meta_info = {"volume_mm3": validation.get("volumeMm3", meta.get("volume_mm3")),
+                        "bbox": validation.get("bbox", meta.get("bbox"))}
+            is_solid = validation.get("isSolid")
             if is_solid is None:
-                is_solid = (meta.get("validation") or {}).get("is_solid")
+                is_solid = validation.get("is_solid", meta.get("is_solid"))
             if is_solid is False:
                 problems.append("is_solid=false")
             elif is_solid is None:
@@ -201,10 +266,10 @@ def verify(slug: str) -> dict:
     return {"ok": not problems, "problems": problems, **meta_info}
 
 
-def prune(slug: str) -> list[str]:
+def prune(slug: str, out_name: str | None = None) -> list[str]:
     """Strip the project to importable base files (.py/.step/.stp/.stl + spec.md),
     mirroring the old pipeline's strip_to_base_files. Returns removed paths."""
-    out_dir = OUT_DIR / slug
+    out_dir = OUT_DIR / (out_name or slug)
     removed = []
     for p in sorted(out_dir.rglob("*"), key=lambda x: -len(x.parts)):
         if p.is_file():
@@ -304,22 +369,26 @@ async def run_session(slug: str, prompt: str, log_name: str, max_turns: int = MA
     return result
 
 
-async def generate(slug: str) -> dict:
+async def generate(slug: str, out_name: str | None = None) -> dict:
+    """Build the model for `slug`. `out_name` (default = slug) isolates the
+    output dir + session logs so best-of-N candidates can run concurrently
+    without clobbering each other's out/<name>/ and sessions/<name>/."""
+    name = out_name or slug
     text_dir = TEXT_DIR / slug
     if not (text_dir / "design_readme.md").is_file():
         return {"status": "error", "error": f"no crawled text at {text_dir} — run crawl_text.py first"}
 
-    out_dir = OUT_DIR / slug
+    out_dir = OUT_DIR / name
     if out_dir.exists():
         shutil.rmtree(out_dir)  # a rerun is an intentional redo
 
-    result = await run_session(slug, build_prompt(slug), "transcript")
+    result = await run_session(name, build_prompt(slug, name), "transcript")
 
-    v = verify(slug)
+    v = verify(slug, name)
     result["verify"] = v
     if result["status"] == "done" and v["ok"]:
-        result["pruned"] = len(prune(slug))
-        result["out_dir"] = str(OUT_DIR / slug)
+        result["pruned"] = len(prune(slug, name))
+        result["out_dir"] = str(OUT_DIR / name)
     elif result["status"] == "done":
         result["status"] = "incomplete"  # session reported success but deliverables fail
     return result
@@ -328,8 +397,11 @@ async def generate(slug: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("slug", help="model slug — must exist under text/<slug>/")
+    ap.add_argument("--out-name", default=None,
+                    help="output dir / session-log name (default: slug); set per "
+                         "candidate for parallel best-of-N builds")
     args = ap.parse_args()
-    result = asyncio.run(generate(args.slug))
+    result = asyncio.run(generate(args.slug, args.out_name))
     print(json.dumps(result))
     return 0 if result["status"] == "done" and result.get("verify", {}).get("ok") else 1
 

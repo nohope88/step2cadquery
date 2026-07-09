@@ -40,9 +40,11 @@ def make_good_project(out_dir, slug="part", is_solid=True, warnings=(), sidecar=
     (out_dir / f"{slug}.step").write_text("ISO-10303-21;\n")
     (out_dir / f"{slug}.stl").write_text("solid part\n")
     if sidecar:
+        # This is cadpy's real sidecar shape: camelCase, nested under
+        # "validation" — see out/<slug>/<slug>.step.json from a live run.
         (out_dir / f"{slug}.step.json").write_text(json.dumps({
-            "volume_mm3": 123.4, "bbox": [1, 2, 3],
-            "is_solid": is_solid, "warnings": list(warnings),
+            "validation": {"volumeMm3": 123.4, "bbox": {"min": [0, 0, 0], "max": [1, 2, 3]},
+                          "isSolid": is_solid, "warnings": list(warnings)},
         }))
     return out_dir
 
@@ -58,7 +60,34 @@ def test_build_prompt_uses_brief_when_present(dirs):
 
 def test_build_prompt_creativity_without_brief(dirs):
     (gen_model.TEXT_DIR / "s").mkdir(parents=True)
-    assert "CREATIVITY" in gen_model.build_prompt("s")
+    prompt = gen_model.build_prompt("s")
+    assert "CREATIVITY" in prompt
+    assert "FIDELITY LOOP" not in prompt  # no source oracle without a brief
+
+
+def test_build_prompt_adds_fidelity_loop_when_source_step_exists(dirs, tmp_path):
+    text_dir = gen_model.TEXT_DIR / "s"
+    text_dir.mkdir(parents=True)
+    (text_dir / "brief.md").write_text("# T\nbody\n")
+    src = tmp_path / "part.step"
+    src.write_text("ISO-10303-21;")
+    (text_dir / "meta.json").write_text(json.dumps({"source_step": str(src)}))
+    prompt = gen_model.build_prompt("s")
+    assert "FIDELITY LOOP" in prompt and str(src) in prompt
+    assert "evaluate.py" in prompt and ">= 95" in prompt
+    assert "FAITHFUL, high-fidelity parametric" in prompt
+    assert "you have NO source geometry files" not in prompt
+
+
+def test_build_prompt_no_fidelity_loop_when_source_step_missing(dirs, tmp_path):
+    text_dir = gen_model.TEXT_DIR / "s"
+    text_dir.mkdir(parents=True)
+    (text_dir / "brief.md").write_text("# T\nbody\n")
+    # meta.json points at a file that isn't on disk -> no oracle, fall back
+    (text_dir / "meta.json").write_text(json.dumps({"source_step": str(tmp_path / "ghost.step")}))
+    prompt = gen_model.build_prompt("s")
+    assert "FIDELITY LOOP" not in prompt
+    assert "you have NO source geometry files" in prompt
 
 
 # ---------- _collect_warnings ----------
@@ -84,7 +113,8 @@ def test_verify_missing_out_dir(dirs):
 def test_verify_good_project(dirs):
     make_good_project(gen_model.OUT_DIR / "s")
     v = gen_model.verify("s")
-    assert v["ok"] and v["volume_mm3"] == 123.4 and v["bbox"] == [1, 2, 3]
+    assert v["ok"] and v["volume_mm3"] == 123.4
+    assert v["bbox"] == {"min": [0, 0, 0], "max": [1, 2, 3]}
 
 
 def test_verify_empty_project(dirs):
@@ -119,7 +149,16 @@ def test_verify_missing_is_solid(dirs):
     assert "is_solid not recorded in sidecar" in gen_model.verify("s")["problems"]
 
 
-def test_verify_nested_is_solid_false(dirs):
+def test_verify_nested_isSolid_false(dirs):
+    # cadpy's real, camelCase schema — this is the path a live build hits.
+    out = make_good_project(gen_model.OUT_DIR / "s", sidecar=False)
+    (out / "part.step.json").write_text(json.dumps(
+        {"validation": {"isSolid": False, "warnings": []}}))
+    assert "is_solid=false" in gen_model.verify("s")["problems"]
+
+
+def test_verify_nested_snake_case_is_solid_false_fallback(dirs):
+    # legacy/alternate generators that used snake_case — kept working too.
     out = make_good_project(gen_model.OUT_DIR / "s", sidecar=False)
     (out / "part.step.json").write_text(json.dumps(
         {"validation": {"is_solid": False, "warnings": []}}))
