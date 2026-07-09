@@ -38,8 +38,9 @@ class FakeKDTree:
 
     def query(self, qs):
         qs = np.asarray(qs, dtype=float)
-        d = np.linalg.norm(qs[:, None, :] - self.pts[None, :, :], axis=2).min(axis=1)
-        return d, None
+        dmat = np.linalg.norm(qs[:, None, :] - self.pts[None, :, :], axis=2)
+        idx = dmat.argmin(axis=1)
+        return dmat[np.arange(len(qs)), idx], idx
 
 
 def rotation_matrix(angle, axis):
@@ -92,6 +93,53 @@ def test_size_and_volume_errors_reduce_score():
     assert r["bbox_err_pct"]["x"] == 20.0 and r["chamfer_mm"] > 0
 
 
+# ---------- icp_align ----------
+
+def test_icp_align_corrects_small_rotation():
+    # a small (~5 deg) yaw of an asymmetric point cloud is exactly the kind
+    # of build-noise pose error ICP should be able to undo
+    rng = np.random.default_rng(0)
+    src = rng.uniform(-10, 10, size=(200, 3))
+    angle = np.radians(5.0)
+    c, s = np.cos(angle), np.sin(angle)
+    rot2d = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    rotated = src @ rot2d.T
+    _, angle_deg = evaluate.icp_align(src, rotated)
+    assert angle_deg == pytest.approx(5.0, abs=0.5)
+
+
+def test_icp_align_on_identical_points_is_near_zero():
+    rng = np.random.default_rng(1)
+    src = rng.uniform(-10, 10, size=(50, 3))
+    _, angle_deg = evaluate.icp_align(src, src.copy())
+    assert angle_deg < 1e-3
+
+
+def test_evaluate_applies_small_icp_correction():
+    # CUBE rotated 5 deg about z is a small pose error the score should not
+    # punish once ICP corrects it — score should land near 100, not be
+    # dragged down by an alignment artifact.
+    angle = np.radians(5.0)
+    c, s = np.cos(angle), np.sin(angle)
+    rotated = [(x * c - y * s, x * s + y * c, z) for x, y, z in CUBE]
+    r = evaluate.evaluate(FakeMesh(CUBE, 1000.0), FakeMesh(rotated, 1000.0))
+    assert r["icp_applied"] is True
+    assert r["icp_rotation_deg"] == pytest.approx(5.0, abs=0.5)
+    assert r["score"] > 95.0
+
+
+def test_evaluate_skips_icp_correction_beyond_cap():
+    # a 45 deg rotation is a real orientation/shape mismatch, not build
+    # noise — ICP may still find a fit, but it must not be silently applied
+    angle = np.radians(45.0)
+    c, s = np.cos(angle), np.sin(angle)
+    rotated = [(x * c - y * s, x * s + y * c, z) for x, y, z in CUBE]
+    r = evaluate.evaluate(FakeMesh(CUBE, 1000.0), FakeMesh(rotated, 1000.0))
+    assert r["icp_applied"] is False
+    assert r["icp_rotation_deg"] > evaluate.ICP_MAX_ROTATION_DEG
+    assert r["chamfer_mm"] > 0
+
+
 def test_load_mesh_stl(stub_geometry_deps, tmp_path):
     stl = tmp_path / "m.stl"
     stl.write_text("solid\n")
@@ -104,12 +152,19 @@ def test_load_mesh_step_via_cadquery(stub_geometry_deps, tmp_path, monkeypatch):
     step.write_text("ISO-10303-21;")
     cq = types.ModuleType("cadquery")
     cq.importers = types.SimpleNamespace(importStep=lambda p: "wp")
-    cq.exporters = types.SimpleNamespace(
-        export=lambda wp, p: __import__("pathlib").Path(p).write_text("solid\n"))
+    captured = {}
+
+    def fake_export(wp, p, **kwargs):
+        captured.update(kwargs)
+        __import__("pathlib").Path(p).write_text("solid\n")
+
+    cq.exporters = types.SimpleNamespace(export=fake_export)
     monkeypatch.setitem(sys.modules, "cadquery", cq)
     stub_geometry_deps.load = lambda p, force: ("tessellated", p)
     result = evaluate.load_mesh(step)
     assert result[0] == "tessellated" and result[1].endswith("m.stl")
+    assert captured == {"tolerance": evaluate.STEP_TOLERANCE,
+                        "angularTolerance": evaluate.STEP_ANGULAR_TOLERANCE}
 
 
 def test_main(monkeypatch, capsys, tmp_path):

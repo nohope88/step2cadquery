@@ -58,6 +58,17 @@ def test_prompt_embeds_measurements_and_paths(dirs):
     assert "59.45" in prompt and "GROUND TRUTH" in prompt
     assert str(text_dir / "showcase_images") in prompt
     assert "FAITHFUL RECONSTRUCTION" in prompt
+    assert '"volume_mm3": 42.0' not in prompt  # no cross_sections.json written
+
+
+def test_prompt_embeds_cross_sections_when_present(dirs):
+    text_dir = make_stage0_output("s")
+    cross = {"principal_axis": "x", "solids": [{"index": 0, "bbox_mm": {"x": [0, 10]},
+                                                "volume_mm3": 42.0, "stations": []}]}
+    (text_dir / "cross_sections.json").write_text(json.dumps(cross))
+    prompt = gen_brief_step.build_brief_prompt("s")
+    assert "MEASURED CROSS-SECTIONS" in prompt and '"volume_mm3": 42.0' in prompt
+    assert "This is ground truth:" in prompt
 
 
 # ---------- verify_brief ----------

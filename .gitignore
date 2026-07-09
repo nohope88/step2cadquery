@@ -4,3 +4,4 @@ __pycache__/
 /text/
 /out/
 /sessions/
+.vscode/

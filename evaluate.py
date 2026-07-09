@@ -2,12 +2,17 @@
 """Fidelity check: how close is a rebuilt model to the source STEP?
 
 Aligns both meshes on their bbox centers (also trying a 180° flip about z, in
-case the rebuild faced the other way) and reports:
+case the rebuild faced the other way), then removes any small residual pose
+error (a few degrees/mm of build inaccuracy, not a real shape difference)
+with a capped ICP refinement, and reports:
 
     bbox_err_pct   per-axis bounding-box error (%)
     volume_err_pct volume error (%)
     chamfer_mm     bidirectional nearest-neighbor surface distance (mean, mm)
     chamfer_pct    chamfer as % of the source bbox diagonal
+    icp_rotation_deg  rotation ICP wanted to apply on top of the flip search
+    icp_applied    whether that correction was small enough to trust (see
+                   ICP_MAX_ROTATION_DEG) and actually used for chamfer/score
     score          0-100 fidelity score (100 = identical)
 
 Usage:
@@ -21,7 +26,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-SAMPLES = 30000
+SAMPLES = 100000
+# Tight STL tessellation tolerance for STEP ground truth — cadquery's export
+# default (0.1mm / 0.1rad ~= 5.7deg) is coarser than the rebuild's own STL
+# export and adds tessellation noise to the chamfer distance that has
+# nothing to do with actual shape fidelity.
+STEP_TOLERANCE = 0.02
+STEP_ANGULAR_TOLERANCE = 1.0
+# ICP correction above this angle is treated as a real shape/orientation
+# difference, not build noise, and is left unapplied (score stays honest
+# about it) rather than let alignment quietly absorb a genuine mismatch.
+ICP_MAX_ROTATION_DEG = 10.0
 
 
 def load_mesh(path):
@@ -35,7 +50,8 @@ def load_mesh(path):
         wp = cq.importers.importStep(str(p))
         with tempfile.TemporaryDirectory() as td:
             stl = Path(td) / "m.stl"
-            cq.exporters.export(wp, str(stl))
+            cq.exporters.export(wp, str(stl), tolerance=STEP_TOLERANCE,
+                                angularTolerance=STEP_ANGULAR_TOLERANCE)
             return trimesh.load(str(stl), force="mesh")
     return trimesh.load(str(p), force="mesh")
 
@@ -53,6 +69,38 @@ def chamfer(a_pts, b_pts):
     return float((d_ab.mean() + d_ba.mean()) / 2.0)
 
 
+def icp_align(src_pts, pts, max_iterations=25, tol=1e-5):
+    """Point-to-point ICP (Kabsch-per-iteration rigid fit, no scaling):
+    nudges `pts` onto `src_pts` starting from identity — the meshes are
+    already bbox-centered, so this only needs to correct a small residual
+    pose error, not find a gross alignment. Returns (aligned_pts,
+    total_rotation_deg) so the caller can decide whether to trust it."""
+    from scipy.spatial import cKDTree
+    import numpy as np
+
+    tree = cKDTree(src_pts)
+    cur = pts
+    r_total = np.eye(3)
+    prev_err = None
+    for _ in range(max_iterations):
+        dist, idx = tree.query(cur)
+        matched = src_pts[idx]
+        cur_c, matched_c = cur.mean(axis=0), matched.mean(axis=0)
+        h = (cur - cur_c).T @ (matched - matched_c)
+        u, _, vt = np.linalg.svd(h)
+        d = np.sign(np.linalg.det(vt.T @ u.T))
+        r = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+        t = matched_c - r @ cur_c
+        cur = (r @ cur.T).T + t
+        r_total = r @ r_total
+        err = float(dist.mean())
+        if prev_err is not None and abs(prev_err - err) < tol:
+            break
+        prev_err = err
+    angle_deg = float(np.degrees(np.arccos(np.clip((np.trace(r_total) - 1.0) / 2.0, -1.0, 1.0))))
+    return cur, angle_deg
+
+
 def evaluate(source_mesh, rebuilt_mesh):
     import numpy as np
 
@@ -63,16 +111,23 @@ def evaluate(source_mesh, rebuilt_mesh):
     vol_err = abs(abs(mr.volume) - abs(ms.volume)) / max(abs(ms.volume), 1e-9) * 100.0
 
     src_pts = ms.sample(SAMPLES)
-    best_d, best_flipped = None, False
+    best_d, best_flipped, best_pts = None, False, None
     for flipped in (False, True):
         m = mr.copy()
         if flipped:
             import trimesh.transformations as tt
 
             m.apply_transform(tt.rotation_matrix(np.pi, [0, 0, 1]))
-        d = chamfer(src_pts, m.sample(SAMPLES))
+        pts = m.sample(SAMPLES)
+        d = chamfer(src_pts, pts)
         if best_d is None or d < best_d:
-            best_d, best_flipped = d, flipped
+            best_d, best_flipped, best_pts = d, flipped, pts
+
+    icp_pts, icp_angle = icp_align(src_pts, best_pts)
+    icp_d = chamfer(src_pts, icp_pts)
+    icp_applied = icp_angle <= ICP_MAX_ROTATION_DEG and icp_d < best_d
+    if icp_applied:
+        best_d = icp_d
 
     diag = float(np.linalg.norm(es))
     cham_pct = best_d / diag * 100.0
@@ -85,6 +140,8 @@ def evaluate(source_mesh, rebuilt_mesh):
         "chamfer_mm": round(best_d, 3),
         "chamfer_pct": round(cham_pct, 2),
         "flipped_180": best_flipped,
+        "icp_rotation_deg": round(icp_angle, 2),
+        "icp_applied": icp_applied,
         "score": round(score, 1),
     }
 

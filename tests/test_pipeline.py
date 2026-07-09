@@ -72,6 +72,7 @@ def test_llm_stage_failure_on_exit_code(monkeypatch):
 
 RENDER_JSON = json.dumps({"status": "done", "slug": "s",
                           "bbox_mm": {"x": 1, "y": 2, "z": 3}, "num_solids": 1})
+CROSS_SECTIONS_JSON = json.dumps({"status": "done", "slug": "s", "num_solids": 1, "num_stations": 16})
 BRIEF_OK = {"status": "done", "verify": {"ok": True}, "minutes": 2.0}
 GEN_OK = {"status": "done", "verify": {"ok": True, "volume_mm3": 9.0},
           "minutes": 10.0, "turns": 42, "out_dir": "/out/s"}
@@ -103,6 +104,8 @@ def make_stage_mocks(monkeypatch, brief=(False, BRIEF_OK), gen=(False, GEN_OK), 
     def fake_run_stage(label, cmd):
         if label.startswith("EVALUATE"):
             return eval_rc, EVAL_JSON + "\n"
+        if label.startswith("CROSS-SECTIONS"):
+            return 0, CROSS_SECTIONS_JSON + "\n"
         return 0, RENDER_JSON + "\n"
 
     monkeypatch.setattr(pipeline, "run_stage", fake_run_stage)
@@ -111,15 +114,15 @@ def make_stage_mocks(monkeypatch, brief=(False, BRIEF_OK), gen=(False, GEN_OK), 
                         lambda label, script, slug: results[script])
 
 
-def test_main_success_without_stl_skips_eval(tmp_path, monkeypatch, capsys):
+def test_main_success_without_model_skips_eval(tmp_path, monkeypatch, capsys):
     step = tmp_path / "p.step"
     step.write_text("x")
     set_argv(monkeypatch, step)
-    make_stage_mocks(monkeypatch)  # GEN_OK's out_dir has no .stl on disk
+    make_stage_mocks(monkeypatch)  # GEN_OK's out_dir has no model file on disk
     assert pipeline.main() == 0
     out = capsys.readouterr().out
     assert "DONE: /out/s" in out and "turns=42" in out
-    assert "no .stl found to evaluate" in out
+    assert "no model file found to evaluate" in out
 
 
 def test_main_success_with_fidelity_report(tmp_path, monkeypatch, capsys):
@@ -135,6 +138,54 @@ def test_main_success_with_fidelity_report(tmp_path, monkeypatch, capsys):
     assert "fidelity: score=90.0" in capsys.readouterr().out
     saved = json.loads((tmp_path / "text" / "s" / "fidelity.json").read_text())
     assert saved["score"] == 90.0
+
+
+def test_main_prefers_step_over_stl_for_eval(tmp_path, monkeypatch, capsys):
+    step = tmp_path / "p.step"
+    step.write_text("x")
+    out_dir = tmp_path / "out" / "s"
+    out_dir.mkdir(parents=True)
+    (out_dir / "s.stl").write_text("solid")
+    (out_dir / "s.step").write_text("ISO-10303-21;")
+    set_argv(monkeypatch, step)
+
+    graded = {}
+
+    def fake_run_stage(label, cmd):
+        if label.startswith("EVALUATE"):
+            graded["target"] = cmd[-1]  # last arg is the rebuilt file
+            return 0, EVAL_JSON + "\n"
+        if label.startswith("CROSS-SECTIONS"):
+            return 0, CROSS_SECTIONS_JSON + "\n"
+        return 0, RENDER_JSON + "\n"
+
+    monkeypatch.setattr(pipeline, "run_stage", fake_run_stage)
+    monkeypatch.setattr(pipeline, "llm_stage",
+                        lambda label, script, slug: {"gen_brief_step.py": (False, BRIEF_OK),
+                                                     "gen_model.py": (False, dict(GEN_OK, out_dir=str(out_dir)))}[script])
+    monkeypatch.setattr(pipeline, "HERE", tmp_path)
+    assert pipeline.main() == 0
+    assert graded["target"].endswith("s.step")  # graded the STEP, not the STL
+
+
+def test_main_cross_sections_failure_is_non_fatal(tmp_path, monkeypatch, capsys):
+    step = tmp_path / "p.step"
+    step.write_text("x")
+    set_argv(monkeypatch, step)
+
+    def fake_run_stage(label, cmd):
+        if label.startswith("CROSS-SECTIONS"):
+            return 1, ""
+        if label.startswith("EVALUATE"):
+            return 0, EVAL_JSON + "\n"
+        return 0, RENDER_JSON + "\n"
+
+    monkeypatch.setattr(pipeline, "run_stage", fake_run_stage)
+    monkeypatch.setattr(pipeline, "llm_stage",
+                        lambda label, script, slug: {"gen_brief_step.py": (False, BRIEF_OK),
+                                                     "gen_model.py": (False, GEN_OK)}[script])
+    assert pipeline.main() == 0
+    assert "cross-sections stage failed" in capsys.readouterr().out
 
 
 def test_main_evaluate_failure_is_non_fatal(tmp_path, monkeypatch, capsys):

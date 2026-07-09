@@ -87,6 +87,17 @@ def main() -> int:
     slug = render["slug"]
     print(f"\nrendered: {slug} bbox={render['bbox_mm']} solids={render['num_solids']}")
 
+    # 1b) exact per-solid + per-station geometry (ground truth the brief
+    # stage should read instead of eyeballing proportions from renders)
+    rc, out = run_stage("CROSS-SECTIONS (measured geometry)", UV + [
+        "--with", "cadquery", "--with", "trimesh", "--with", "numpy",
+        "python3", str(HERE / "cross_sections.py"), slug])
+    if rc != 0:
+        print(f"\n cross-sections stage failed (exit {rc}) — continuing without it")
+    else:
+        cross = last_json_line(out)
+        print(f"\n cross-sections: {cross['num_solids']} solids, {cross['num_stations']} stations")
+
     # 2) faithful-reconstruction brief (vision over the renders)
     brief_failed, brief = llm_stage("BRIEF (faithful reconstruction)", "gen_brief_step.py", slug)
     if brief_failed:
@@ -102,12 +113,17 @@ def main() -> int:
     print(f"\n DONE: {gen['out_dir']}  (turns={gen['turns']}, {gen['minutes']}min, "
           f"volume={gen['verify'].get('volume_mm3')})")
 
-    # 4) fidelity report vs the source (informational — never fails the run)
-    stls = sorted(Path(gen["out_dir"]).glob("*.stl"))
-    if stls:
+    # 4) fidelity report vs the source (informational — never fails the run).
+    # Grade against the rebuilt .step, not the deliverable .stl: evaluate.py
+    # re-tessellates a STEP at its own fine tolerance, so a STEP-vs-STEP
+    # comparison measures true reconstruction fidelity instead of charging
+    # the score for the .stl's coarser export mesh. Fall back to the .stl.
+    out_files = list(Path(gen["out_dir"]).glob("*.step")) + list(Path(gen["out_dir"]).glob("*.stp"))
+    out_files = out_files or sorted(Path(gen["out_dir"]).glob("*.stl"))
+    if out_files:
         rc, out = run_stage("EVALUATE (fidelity vs source)", UV + [
             "--with", "cadquery", "--with", "trimesh", "--with", "scipy",
-            "python3", str(HERE / "evaluate.py"), str(step_path), str(stls[0])])
+            "python3", str(HERE / "evaluate.py"), str(step_path), str(out_files[0])])
         if rc == 0:
             fidelity = last_json_line(out)
             fid_path = HERE / "text" / slug / "fidelity.json"
@@ -118,7 +134,7 @@ def main() -> int:
         else:
             print("\n evaluate failed (non-fatal)")
     else:
-        print("\n no .stl found to evaluate (non-fatal)")
+        print("\n no model file found to evaluate (non-fatal)")
     return 0
 
 
