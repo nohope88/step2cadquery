@@ -14,10 +14,10 @@ pip install -r requirements.txt
 
 That pulls in ``cadquery`` and ``numpy``. CadQuery brings ``OCP`` (the
 OpenCASCADE Python bindings, ~150MB). The cadpy artifact pipeline is
-vendored into ``scripts/packages/cadpy/`` at build time by Panda's
-``scripts/build/build-skill-runtimes.sh``; its own runtime deps
-(``trimesh``, ``pygltflib``, …) get satisfied alongside CadQuery in the
-shared Python sidecar.
+vendored into ``scripts/packages/cadpy/`` and committed to this repo, so
+nothing extra needs to be generated; its own runtime deps (``trimesh``,
+``pygltflib``, …) get satisfied alongside CadQuery in the same Python
+environment.
 
 If you use ``uv``:
 

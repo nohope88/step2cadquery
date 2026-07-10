@@ -253,10 +253,9 @@ def in_subprocess_main(
     _cq.exporters  # noqa: B018
     _cq.Workplane("XY").box(1, 1, 1)
 
-    # 2. Pre-import cadpy. This lives at <skill>/scripts/packages/cadpy/
-    #    after the vendor step (build-skill-runtimes.sh). During development
-    #    the path may be empty and the import resolves to a sibling install
-    #    or a test-time stub (see tests/conftest.py).
+    # 2. Pre-import cadpy. A vendored copy is committed at
+    #    <skill>/scripts/packages/cadpy/. Tests may override it with an
+    #    in-process stub (see tests/conftest.py).
     _skill_root = Path(__file__).resolve().parents[2]
     _packages_dir = _skill_root / "scripts" / "packages"
     if str(_packages_dir) not in sys.path:
