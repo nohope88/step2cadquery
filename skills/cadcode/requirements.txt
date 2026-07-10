@@ -1,9 +1,8 @@
 cadquery
 numpy
 
-# cadpy is vendored into scripts/packages/cadpy/ at build time by
-# scripts/build/build-skill-runtimes.sh (run from the Panda repo root).
-# It is NOT a PyPI package; this comment exists so future Track C
+# cadpy is vendored into scripts/packages/cadpy/ and committed to this
+# repo. It is NOT a PyPI package; this comment exists so future Track C
 # (Tauri integration) knows to add the vendor path to PYTHONPATH instead
 # of pip-installing.
 #
