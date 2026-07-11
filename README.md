@@ -63,6 +63,15 @@ python3 pipeline.py examples/3DBenchyStepFile.step
 # → out/3dbenchystepfile/{main.py, params.py, spec.md, *.step, *.stl}
 ```
 
+Every run ends with two informational scores (written to `text/<slug>/`):
+
+- **fidelity** (`evaluate.py`, 0–100) — is the rebuild the *same shape* as the
+  source? Chamfer distance + bbox + volume after alignment.
+- **printability** (`printability.py`, 0–10, easy/hard/impossible) — will the
+  exported STL actually *print*? Watertightness, bad edges, degenerate
+  triangles, tiny components, overhang fraction. Vendored from
+  reinSPQR/step-to-cadquery's evaluation skill.
+
 ## Requirements
 
 - `uv` — stages pull their Python deps on demand
