@@ -135,6 +135,24 @@ def main() -> int:
             print("\n evaluate failed (non-fatal)")
     else:
         print("\n no model file found to evaluate (non-fatal)")
+
+    # 5) printability report on the deliverable .stl (informational — never
+    # fails the run). Fidelity grades shape vs the source; this grades whether
+    # the exported mesh will actually print (watertight, bad edges, overhangs).
+    stl_files = sorted(Path(gen["out_dir"]).glob("*.stl"))
+    if stl_files:
+        rc, out = run_stage("PRINTABILITY (mesh risk)", UV + [
+            "--with", "numpy",
+            "python3", str(HERE / "printability.py"), "--assembly", str(stl_files[0])])
+        if rc == 0:
+            printab = last_json_line(out)
+            pr_path = HERE / "text" / slug / "printability.json"
+            pr_path.parent.mkdir(parents=True, exist_ok=True)
+            pr_path.write_text(json.dumps(printab), encoding="utf-8")
+            print(f"\n printability: score={printab['score']} class={printab['class']} "
+                  f"risks={len(printab.get('risk_factors', []))}")
+        else:
+            print("\n printability failed (non-fatal)")
     return 0
 
 
