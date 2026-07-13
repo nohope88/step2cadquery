@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -146,12 +147,42 @@ def evaluate(source_mesh, rebuilt_mesh):
     }
 
 
+def stop_verdict(score, target, prev_score, min_delta):
+    """Turn a raw score into an explicit loop directive the builder must obey.
+    Returns (stop: bool, verdict: str). The whole point is a HARD stop the
+    moment the target is met — a passing score and a higher one are the same
+    `done`, and free-running past it only burns cycles + context."""
+    if score >= target:
+        return True, (f"STOP — target met (score {score} >= target {target}). Do NOT "
+                      "refine further: a passing score and a higher score are the SAME "
+                      "'done'. Hand off the model now.")
+    if prev_score is not None and (score - prev_score) < min_delta:
+        return True, (f"STOP — diminishing returns (gained {round(score - prev_score, 1)} "
+                      f"pts < min_delta {min_delta} vs previous {prev_score}). Another "
+                      "cycle costs context for no real gain. Hand off now.")
+    return False, (f"CONTINUE — score {score} is below target {target}. Fix ONLY the single "
+                   f"worst metric with the smallest responsible param change, re-cad, then "
+                   f"re-score passing `--prev-score {score}`.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("source", help="source .step/.stl (ground truth)")
     ap.add_argument("rebuilt", help="rebuilt .step/.stl to grade")
+    ap.add_argument("--target", type=float,
+                    default=float(os.environ.get("FIDELITY_TARGET", "95")),
+                    help="score at or above which the loop must STOP (default 95)")
+    ap.add_argument("--prev-score", type=float, default=None,
+                    help="last cycle's score — lets the scorer flag diminishing returns")
+    ap.add_argument("--min-delta", type=float,
+                    default=float(os.environ.get("FIDELITY_MIN_DELTA", "1.0")),
+                    help="minimum score gain that justifies another cycle (default 1.0)")
     args = ap.parse_args()
     result = evaluate(load_mesh(args.source), load_mesh(args.rebuilt))
+    stop, verdict = stop_verdict(result["score"], args.target, args.prev_score, args.min_delta)
+    result["target"] = args.target
+    result["stop"] = stop
+    result["verdict"] = verdict
     result["source"] = str(args.source)
     result["rebuilt"] = str(args.rebuilt)
     print(json.dumps(result))
