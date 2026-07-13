@@ -46,6 +46,10 @@ EVAL_CMD = f"uv run --python 3.12 --with cadquery --with trimesh --with scipy py
 # returns ceiling — chasing the last point burns turns on micro-geometry).
 FIDELITY_TARGET = float(os.environ.get("FIDELITY_TARGET", "95"))
 FIDELITY_MAX_CYCLES = int(os.environ.get("FIDELITY_MAX_CYCLES", "4"))
+# Minimum score gain that justifies another scoring cycle — below this the
+# scorer tells the builder to stop (diminishing returns). Keeps a passing-but-
+# still-creeping loop from burning cycles + context past the point of value.
+FIDELITY_MIN_DELTA = float(os.environ.get("FIDELITY_MIN_DELTA", "1.0"))
 
 BASE_EXTS = {".py", ".step", ".stp", ".stl"}
 KEEP_FILES = {"spec.md"}  # Panda importer reads its H1 as title, first paragraph as description
@@ -102,21 +106,31 @@ geometry is available at `{source_step}` for SCORING ONLY. The measured
 cross-section table in the brief already came from it. Once your model
 verifies as a clean solid, close a quantitative fidelity loop:
 
-  {eval_cmd} {source_step} {out_dir}/{slug}.step
+  {eval_cmd} {source_step} {out_dir}/{slug}.step --target {target}
 
 It prints one JSON line: `score` (0-100), `chamfer_mm` (mean surface distance),
 `bbox_err_pct` (per-axis size error), `volume_err_pct`, and `icp_rotation_deg`
 (how much alignment help it needed — a large value means your model's overall
-proportions/orientation are off, not just details). Read it and iterate the
-smallest responsible param change, re-`cad`, re-score:
+proportions/orientation are off, not just details). It ALSO prints `stop` (bool)
+and `verdict` (a directive) — these govern the loop; obey them. Read the metrics
+and iterate the smallest responsible param change, re-`cad`, re-score:
 - high `chamfer_mm` / `icp_rotation_deg` → the lofted body's profile is off;
   pull your loft stations closer to the brief's measured (x, y-range, z-range)
   table and add loft resolution so curves aren't faceted.
 - `bbox_err_pct` on an axis → a dimension is wrong; fix that param.
 - `volume_err_pct` high → wrong hollowing: tune wall thickness / cavity depth
   toward the brief's measured per-solid volumes.
-Push the score to >= {target} or until it stops improving, whichever comes
-first, but no more than {max_cycles} scoring cycles — then stop and hand off.
+
+STOP CONDITION — obey the scorer, do NOT free-run:
+- When the scorer returns `stop: true`, STOP IMMEDIATELY and hand off — do not
+  run another cycle even if the score is still creeping up. A score of exactly
+  {target} and a score of 99 are the SAME `done` here; the extra points cost
+  cycles and context (and risk overflowing it) for zero deliverable benefit.
+- Only iterate while `stop` is false (score below {target}). On every cycle
+  AFTER the first, pass `--prev-score <your previous score>` so the scorer can
+  end the loop on diminishing returns (a gain < {min_delta} pts is not worth
+  another cycle).
+- Hard backstop: never exceed {max_cycles} scoring cycles regardless of score.
 
 HARD RULES for this loop: NEVER `importStep`, copy, trace, or re-export the
 source geometry — your `main.py` must build the shape parametrically from the
@@ -152,7 +166,8 @@ The original geometry exists but is for SCORING ONLY (see FIDELITY LOOP) — you
 build the shape parametrically, you do not import or copy it."""
         fidelity_section = "\n\n" + FIDELITY_SECTION.format(
             source_step=source_step, eval_cmd=EVAL_CMD, out_dir=out_dir, slug=slug,
-            target=FIDELITY_TARGET, max_cycles=FIDELITY_MAX_CYCLES)
+            target=FIDELITY_TARGET, max_cycles=FIDELITY_MAX_CYCLES,
+            min_delta=FIDELITY_MIN_DELTA)
     else:
         intro = """You are designing an ORIGINAL parametric CadQuery model INSPIRED BY a real
 3D-printable product, working from its text description and reference photos
